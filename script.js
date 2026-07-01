@@ -286,9 +286,9 @@ async function searchStatus() {
 
     const catStats = {
       'ก่อนกลางภาค': { current: 0, max: 0, weight: 20 },
-      'กลางภาค':     { current: 0, max: 0, weight: 20 },
+      'กลางภาค':     { current: 0, max: 0, weight: 25 },
       'หลังกลางภาค': { current: 0, max: 0, weight: 20 },
-      'ปลายภาค':     { current: 0, max: 0, weight: 30 }
+      'ปลายภาค':     { current: 0, max: 0, weight: 25 }
     };
 
     const uniqueMap = {};
