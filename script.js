@@ -189,10 +189,27 @@ const gasCall = async (fnName, ...args) => {
     if (error) throw error; return data;
   }
   if (fnName === 'getAttendanceForRoom') {
-    const { data: sts } = await _sb.from('students').select('id').eq('classroom', args[0]);
+    const [classroom, subject] = args;
+    const { data: sts, error: e1 } = await _sb.from('students').select('id').eq('classroom', classroom);
+    if (e1) throw e1;
     if (!sts?.length) return [];
-    const { data } = await _sb.from('attendance').select('*').in('student_id', sts.map(s => s.id)).order('attendance_date', { ascending: true });
-    return data || [];
+    const ids  = sts.map(s => s.id);
+    const PAGE = 1000;
+    let all = [];
+    for (let from = 0; ; from += PAGE) {
+      let q = _sb.from('attendance').select('*')
+        .in('student_id', ids)
+        .order('attendance_date', { ascending: true })
+        .order('student_id',      { ascending: true })
+        .order('subject',         { ascending: true })   // ให้ลำดับคงที่ ไม่งั้นแบ่งหน้าแล้วแถวอาจซ้ำ/หาย
+        .range(from, from + PAGE - 1);
+      if (subject) q = q.eq('subject', subject);
+      const { data, error } = await q;
+      if (error) throw error;
+      all = all.concat(data || []);
+      if (!data || data.length < PAGE) break;
+    }
+    return all;
   }
   if (fnName === 'markStudentAttendance') {
     const [studentId, date, status, remark, subject, hours] = args;
@@ -1459,6 +1476,8 @@ async function exportExcel() {
 
 async function exportAttendanceReport() {
   const room = $('exp-att-room').value, subj = $('exp-att-subj').value;
+  const allAtt = await gasCall('getAttendanceForRoom', room, subj);
+  const filteredAtt = (allAtt || []).filter(a => a.subject === subj);
   if (!room || !subj) { showToast('กรุณาเลือกห้องและวิชา', 'error'); return; }
   try {
     showToast('🚀 กำลังสร้างรายงาน...', 'info');
