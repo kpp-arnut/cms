@@ -171,10 +171,15 @@ const gasCall = async (fnName, ...args) => {
     if (error) throw error; return data || [];
   }
   if (fnName === 'getAttendanceByDate') {
-    const [classroom, date] = args;
+    const [classroom, date, subject] = args;
     const { data: sts } = await _sb.from('students').select('id').eq('classroom', classroom);
     if (!sts?.length) return [];
-    const { data } = await _sb.from('attendance').select('*').in('student_id', sts.map(s => s.id)).eq('attendance_date', date);
+    let q = _sb.from('attendance').select('*')
+      .in('student_id', sts.map(s => s.id))
+      .eq('attendance_date', date);
+    if (subject) q = q.eq('subject', subject);
+    const { data, error } = await q;
+    if (error) throw error;
     return data || [];
   }
   if (fnName === 'saveAttendance') {
@@ -674,17 +679,24 @@ async function handleScan(val) {
 // ─── ATTENDANCE ────────────────────────────────────────────
 async function loadAttendance() {
   stopAttendanceScanner(); $('att-scan-sw').checked = false; $('att-scan-area').style.display = 'none';
-  const room = $('att-room').value, date = $('att-date').value;
-  if (!room || !date) { showToast('กรุณาเลือกห้องและวันที่', 'error'); return; }
-  $('attendance-title').textContent  = '📋 เช็กชื่อ ห้อง ' + room + ' วันที่ ' + date;
+  const room = $('att-room').value, date = $('att-date').value, subj = $('att-subj').value;
+  if (!room || !date || !subj) { showToast('กรุณาเลือกห้อง วิชา และวันที่', 'error'); return; }
+  $('attendance-title').textContent  = `📋 เช็กชื่อ ห้อง ${room} | ${subj} | ${date}`;
   $('attendance-wrap').style.display = 'block';
   $('attendance-tbody').innerHTML    = '<tr><td colspan="5"><div class="loading"><div class="spinner"></div>กำลังโหลด...</div></td></tr>';
   try {
     const classStudents = students.filter(s => s.classroom === room).sort((a, b) => a.seat_no - b.seat_no);
-    const raw = await gasCall('getAttendanceByDate', room, date);
+    const raw = await gasCall('getAttendanceByDate', room, date, subj);
     const aMap = {};
     (raw || []).forEach(a => aMap[a.student_id] = a);
-    attendanceRows = classStudents.map(s => { const a = aMap[s.id] || {}; return { student: s, status: a.status || 'ขาด', remark: a.remark || '' }; });
+
+    // ถ้ามีข้อมูลเดิม ให้ดึงจำนวนชั่วโมงกลับมาแสดง
+    if (raw?.length && raw[0].hours) $('att-hours').value = raw[0].hours;
+
+    attendanceRows = classStudents.map(s => {
+      const a = aMap[s.id] || {};
+      return { student: s, status: a.status || 'ขาด', remark: a.remark || '' };
+    });
     renderAttendanceTable();
   } catch (e) {
     showToast('โหลดการเข้าเรียนล้มเหลว: ' + e, 'error'); $('attendance-tbody').innerHTML = '';
