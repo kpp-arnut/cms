@@ -9,6 +9,11 @@ let assignments       = [];
 let gradingRows       = [];
 let attendanceRows    = [];
 let adminInitialized  = false;
+let gradingAsgnId = null;   
+let gradingLoadSeq = 0;     
+let gradingDirty  = false;  
+let gradingSaving = false;  
+let gradingSnap   = { subj: '', room: '', asgn: '' };
 
 let html5QrCode = null, scanning = false, lastScannedText = '', lastScannedAt = 0;
 let attendanceQr = null, attendanceScanning = false, lastAttendanceScan = '', lastAttendanceScanAt = 0;
@@ -260,6 +265,10 @@ async function initAdmin() {
   }
   populateDropdowns();
   if (!$('att-date').value) $('att-date').value = new Date().toISOString().slice(0, 10);
+  ['g-subj', 'g-room', 'g-asgn'].forEach(id => {
+    const el = $(id);
+    if (el && !el._autoLoad) { el._autoLoad = true; el.addEventListener('change', onGradingSelectChange); }
+  });
   renderStudentTable(); renderAsgnTable(); adminTab('grading');
 }
 
@@ -496,27 +505,51 @@ function renderAttendanceGrid(subjectName, attendanceData, container) {
 }
 
 // ─── GRADING ───────────────────────────────────────────────
-async function loadGrading() {
+function clearGrading() {
+  gradingRows = []; gradingAsgnId = null; gradingDirty = false;
+  $('grading-wrap').style.display = 'none';
+  $('grading-tbody').innerHTML = '';
   stopQrScanner(); $('scan-sw').checked = false; $('scan-area').style.display = 'none';
+}
+
+async function loadGrading() {
   const aid = $('g-asgn').value, room = $('g-room').value;
-  if (!aid || !room) { showToast('กรุณาเลือกห้องและงาน', 'error'); return; }
+  if (!aid || !room) { clearGrading(); return; }   // ยังเลือกไม่ครบ = เงียบ ๆ
+  stopQrScanner(); $('scan-sw').checked = false; $('scan-area').style.display = 'none';
+
+  const seq  = ++gradingLoadSeq;
   const asgn = assignments.find(a => a.id === aid);
+  gradingAsgnId = null; gradingDirty = false;      // ระหว่างโหลดห้ามบันทึก/สแกน
   $('grading-title').textContent  = '📋 ' + (asgn?.name || 'รายชื่อนักเรียน') + ' — ห้อง ' + room;
   $('grading-wrap').style.display = 'block';
   $('grading-tbody').innerHTML    = '<tr><td colspan="6"><div class="loading"><div class="spinner"></div>กำลังโหลด...</div></td></tr>';
   try {
     const classStudents = students.filter(s => s.classroom === room).sort((a, b) => a.seat_no - b.seat_no);
     const gradesRaw     = await gasCall('getGradesByAssignment', aid);
+    if (seq !== gradingLoadSeq) return;            // มีการเลือกใหม่แล้ว ทิ้งผลเก่า
     const gMap = {};
     gradesRaw.forEach(g => { gMap[g.student_id] = g; });
     gradingRows = classStudents.map(s => {
       const g = gMap[s.id] || {};
       return { student: s, gradeId: g.id || null, status: g.status || 'not_sent', score: (g.score != null) ? g.score : null, maxScore: g.max_score || asgn?.max_score || 10, submittedAt: g.submitted_at || null, deadline: asgn?.deadline || null };
     });
+    gradingAsgnId = aid;
+    gradingSnap = { subj: $('g-subj').value, room, asgn: aid };
     renderGradingTable();
   } catch (e) {
+    if (seq !== gradingLoadSeq) return;
     showToast('โหลดล้มเหลว: ' + e, 'error'); $('grading-tbody').innerHTML = '';
   }
+}
+
+// เรียกเมื่อเปลี่ยน dropdown: เตือนก่อนถ้ามีคะแนนที่ยังไม่บันทึก
+function onGradingSelectChange() {
+  if (gradingDirty && !confirm('มีคะแนนที่ยังไม่ได้บันทึก ต้องการทิ้งและโหลดใหม่ใช่หรือไม่?')) {
+    $('g-subj').value = gradingSnap.subj; $('g-room').value = gradingSnap.room;
+    syncAssignSelect(); $('g-asgn').value = gradingSnap.asgn;
+    return;
+  }
+  loadGrading();
 }
 
 function togLabel(s) {
@@ -571,7 +604,9 @@ function renderGradingTable() {
     const tdScore = document.createElement('td'); tdScore.style.textAlign = 'center';
     const inp = document.createElement('input'); inp.className = 'score-in'; inp.type = 'number'; inp.id = 'sc-' + i;
     inp.value = row.score !== null ? row.score : ''; inp.min = 0; inp.max = row.maxScore; inp.placeholder = row.maxScore;
-    inp.addEventListener('change', () => updateEffectiveDisplay(i)); tdScore.appendChild(inp);
+    inp.addEventListener('change', () => updateEffectiveDisplay(i));
+    inp.addEventListener('input', () => { gradingDirty = true; });
+    tdScore.appendChild(inp);
 
     const tdMax = document.createElement('td'); tdMax.style.cssText = 'text-align:center;font-weight:700;color:var(--text-secondary)'; tdMax.textContent = row.maxScore;
 
@@ -582,6 +617,7 @@ function renderGradingTable() {
 }
 
 function toggleRow(i) {
+  gradingDirty = true;
   gradingRows[i].status = gradingRows[i].status === 'checked' ? 'not_sent' : 'checked';
   const btn = $('tog-' + i);
   btn.className = 'tog ' + (gradingRows[i].status === 'checked' ? 'checked' : 'not-sent');
@@ -589,6 +625,7 @@ function toggleRow(i) {
 }
 
 function markAllStatus(s) {
+  gradingDirty = true;
   gradingRows.forEach((_, i) => {
     gradingRows[i].status = s;
     const btn = $('tog-' + i);
@@ -597,42 +634,45 @@ function markAllStatus(s) {
 }
 
 async function saveGradesNow() {
-  const aid = $('g-asgn').value;
-  if (!aid) { showToast('กรุณาเลือกงานก่อน', 'error'); return; }
+  const aid = gradingAsgnId;                       // ใช้งานที่โหลดจริง ไม่อ่านจาก dropdown
+  if (!aid || gradingSaving) { if (!aid) showToast('กรุณาเลือกห้องและงานก่อน', 'error'); return; }
+  gradingSaving = true;
 
   const saveBtn = document.querySelector('[onclick="saveGradesNow()"]');
   if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = '⏳ กำลังบันทึก...'; }
 
   const now  = new Date().toISOString();
   const rows = gradingRows.map((row, i) => {
-    const sv          = $('sc-' + i).value;
-    const rawScore    = sv !== '' ? parseFloat(sv) : null;
+    const sv       = $('sc-' + i).value;
+    const rawScore = sv !== '' ? parseFloat(sv) : null;
+    const edited   = rawScore !== row.score;       // ช่องคะแนนถูกแก้หรือไม่
     const submittedAt = row.submittedAt || (rawScore !== null ? now : null);
-    const { effectiveScore } = calcLateScore(rawScore, row.maxScore, row.deadline, submittedAt);
+
+    // แถวที่ไม่ได้แก้ → ใช้คะแนนเดิม (หักไปแล้ว) ห้ามหักซ้ำ
+    const score = edited
+      ? calcLateScore(rawScore, row.maxScore, row.deadline, submittedAt).effectiveScore
+      : row.score;
+
     return {
-      student_id:    row.student.id,
-      assignment_id: aid,
-      score:         effectiveScore,
-      max_score:     row.maxScore,
-      status:        rawScore !== null ? 'checked' : row.status,
-      submitted_at:  submittedAt
+      student_id: row.student.id, assignment_id: aid,
+      score, max_score: row.maxScore,
+      status: rawScore !== null ? 'checked' : row.status,
+      submitted_at: submittedAt
     };
   });
 
   try {
     await gasCall('saveGrades', rows);
-
-    // อัปเดต in-memory แทนโหลดซ้ำทั้งหมด
     rows.forEach((r, i) => {
-      gradingRows[i].score       = r.score;
-      gradingRows[i].status      = r.status;
-      gradingRows[i].submittedAt = r.submitted_at;
+      gradingRows[i].score = r.score; gradingRows[i].status = r.status; gradingRows[i].submittedAt = r.submitted_at;
+      $('sc-' + i).value = r.score ?? '';
     });
-
+    gradingDirty = false;
     showToast('บันทึกคะแนนสำเร็จ! 🎉', 'success');
   } catch (e) {
     showToast('บันทึกล้มเหลว: ' + e, 'error');
   } finally {
+    gradingSaving = false;
     if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = '💾 บันทึกคะแนน'; }
   }
 }
@@ -674,9 +714,12 @@ function extractStudentId(raw) {
 
 async function handleScan(val) {
   const studentId = extractStudentId(val); if (!studentId) return;
-  const aid = $('g-asgn').value; if (!aid) { showToast('กรุณาเลือกงานก่อนสแกน', 'error'); return; }
+  const aid = gradingAsgnId; if (!aid) { showToast('ยังโหลดรายชื่อไม่เสร็จ', 'warn'); return; }
   const idx = gradingRows.findIndex(r => r.student.id === studentId);
   if (idx === -1) { showToast('ไม่พบรหัส: ' + studentId, 'error'); return; }
+  if (gradingRows[idx].status === 'checked' && gradingRows[idx].score !== null) {
+    showToast(gradingRows[idx].student.first_name + ' ลงคะแนนแล้ว', 'warn'); return;  // กันสแกนซ้ำ
+  }
   const asgn = assignments.find(a => a.id === aid);
   const rawScore = asgn?.max_score || 10;
   const submittedAt = new Date().toISOString();
